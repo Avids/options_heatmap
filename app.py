@@ -157,7 +157,7 @@ if nodes.empty:
 # pivot by actual strike and expiry
 heatmap = nodes.pivot_table(index="strike", columns="expiry", values="net_oi", aggfunc="sum").fillna(0)
 # ensure strikes are sorted ascending (lowest->highest)
-heatmap = heatmap.sort_index(ascending=True)
+heatmap = heatmap.sort_index(ascending=False)
 
 # labels (ascending)
 expiry_labels = [pd.to_datetime(x).date().isoformat() for x in heatmap.columns]
