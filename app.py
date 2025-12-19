@@ -151,32 +151,43 @@ if nodes.empty:
     st.stop()
 
 # =============================
-# BUILD HEATMAP (categorical axes)
-# - Use positional x/y values and explicit ticktext so Plotly doesn't parse dates
-# - Sort strikes ascending and then reverse axis for display so highest appears on top
+# BUILD HEATMAP (categorical axes, fixed strike order)
+# - We'll flip the matrix for plotting so highest strike is at the top
 # =============================
 # pivot by actual strike and expiry
 heatmap = nodes.pivot_table(index="strike", columns="expiry", values="net_oi", aggfunc="sum").fillna(0)
 # ensure strikes are sorted ascending (lowest->highest)
 heatmap = heatmap.sort_index(ascending=True)
 
-# build labels
+# labels (ascending)
 expiry_labels = [pd.to_datetime(x).date().isoformat() for x in heatmap.columns]
-strike_labels = [str(int(s)) for s in heatmap.index]
+strike_labels = [str(int(s)) for s in heatmap.index]  # ascending
 
-# internal positions
-x_pos = list(range(len(expiry_labels)))
-y_pos = list(range(len(strike_labels)))
+n_rows, n_cols = heatmap.shape
 
-# mapping for hover/text
-expiry_pos_map = {orig: i for i, orig in enumerate(heatmap.columns)}
-strike_pos_map = {str(int(s)): i for i, s in enumerate(heatmap.index)}
+# z as numpy array (rows = ascending strikes)
+z = heatmap.values  # shape (n_rows, n_cols)
 
-# prepare z where rows correspond to y_pos (ascending strikes)
-z = heatmap.values  # shape (n_strikes, n_expiries)
+# For plotting, flip the z vertically so row 0 becomes bottom -> now top is highest strike
+z_plot = np.flipud(z)
+# and build tick labels reversed so top tick corresponds to highest strike
+strike_labels_rev = strike_labels[::-1]
+
+# x and y positional coordinates
+x_pos = list(range(n_cols))
+y_pos = list(range(n_rows))  # 0..n_rows-1 correspond to z_plot rows from top->bottom when we use ticktext=strike_labels_rev
+
+# Build customdata with correct shape (n_rows, n_cols, 2) matching z_plot
+customdata = np.empty((n_rows, n_cols, 2), dtype=object)
+for i in range(n_rows):
+    for j in range(n_cols):
+        # orig_i is index in heatmap.index corresponding to this z_plot row
+        orig_i = n_rows - 1 - i
+        customdata[i, j, 0] = expiry_labels[j]
+        customdata[i, j, 1] = strike_labels[orig_i]
 
 # =============================
-# FIND KING CALL & KING PUT NODES (using original expiry keys)
+# FIND KING CALL & KING PUT NODES (compute plotted coords)
 # =============================
 king_call = {}
 king_put = {}
@@ -190,12 +201,12 @@ for col in heatmap.columns:
 # =============================
 # BUILD PLOTLY HEATMAP (use pos arrays and ticktext)
 # =============================
-# use x positions and y positions (integers) so axis are categorical and aligned with z matrix
 fig = go.Figure(
     data=go.Heatmap(
-        z=z,
+        z=z_plot,
         x=x_pos,
         y=y_pos,
+        customdata=customdata,
         colorscale=[
             [0.0, "rgb(165,0,38)"],
             [0.5, "rgb(255,255,191)"],
@@ -204,42 +215,33 @@ fig = go.Figure(
         colorbar=dict(title="Net Open Interest (Calls − Puts)"),
         zmid=0,
         hovertemplate="<b>Expiry:</b> %{customdata[0]}<br><b>Strike:</b> %{customdata[1]}<br><b>Net OI:</b> %{z}<extra></extra>",
-        customdata=[
-            [
-                expiry_labels[j],
-                strike_labels[i],
-            ]
-            for i in range(len(y_pos))
-            for j in range(len(x_pos))
-        ],
     )
 )
 
-# Note: Plotly's Heatmap customdata expects shape matching z flattened; we provided flattened pairs above.
-# Add text overlays (formatted values). We'll add two scatter traces: non-king and king labels.
+# Build formatted text matrix for plotted z (use z_plot)
+text_matrix = [[format_oi_value(z_plot[i, j]) for j in range(n_cols)] for i in range(n_rows)]
 
-# Build formatted text matrix
-text_matrix = [[format_oi_value(z[i, j]) for j in range(z.shape[1])] for i in range(z.shape[0])]
-
-# Non-king labels
+# Non-king labels (plot y = i, x = j). Need to map king strikes to plotted coordinates.
 non_king_x = []
 non_king_y = []
 non_king_text = []
 non_king_color = []
-max_abs_z = np.nanmax(np.abs(z)) if z.size else 0
+max_abs_z = np.nanmax(np.abs(z_plot)) if z_plot.size else 0
 
-for i in range(z.shape[0]):
-    for j in range(z.shape[1]):
-        strike_val = int(heatmap.index[i])
+for orig_i in range(n_rows):
+    for j in range(n_cols):
+        strike_val = int(heatmap.index[orig_i])  # original ascending index
         expiry_val = heatmap.columns[j]
+        # plotted row for this orig_i:
+        plot_i = n_rows - 1 - orig_i
         if (expiry_val in king_call and strike_val == king_call[expiry_val]) or (
             expiry_val in king_put and strike_val == king_put[expiry_val]
         ):
             continue
         non_king_x.append(j)
-        non_king_y.append(i)
-        non_king_text.append(text_matrix[i][j])
-        non_king_color.append("black" if abs(z[i, j]) < (max_abs_z * 0.35 if max_abs_z > 0 else 1) else "white")
+        non_king_y.append(plot_i)
+        non_king_text.append(text_matrix[plot_i][j])
+        non_king_color.append("black" if abs(z_plot[plot_i, j]) < (max_abs_z * 0.35 if max_abs_z > 0 else 1) else "white")
 
 fig.add_trace(
     go.Scatter(
@@ -261,14 +263,15 @@ for j, expiry in enumerate(heatmap.columns):
     for kind, strike in [("call", king_call.get(expiry)), ("put", king_put.get(expiry))]:
         if strike is None:
             continue
-        # find row index for strike
+        # find original row index
         try:
-            i = list(heatmap.index).index(strike)
+            orig_i = list(heatmap.index).index(strike)
         except ValueError:
             continue
+        plot_i = n_rows - 1 - orig_i
         king_x.append(j)
-        king_y.append(i)
-        king_texts.append(format_oi_value(z[i, j]))
+        king_y.append(plot_i)
+        king_texts.append(format_oi_value(z_plot[plot_i, j]))
 
 fig.add_trace(
     go.Scatter(
@@ -282,7 +285,7 @@ fig.add_trace(
     )
 )
 
-# set tick labels explicitly: x ticks -> expiry_labels, y ticks -> strike_labels (ascending)
+# set tick labels explicitly: x ticks -> expiry_labels, y ticks -> strike_labels_rev (so top shows highest strike)
 fig.update_layout(
     title=f"{symbol} | Price: {price:.2f} | Net OI Heatmap (King Call & Put Nodes)",
     xaxis=dict(
@@ -290,15 +293,14 @@ fig.update_layout(
         tickmode="array",
         tickvals=x_pos,
         ticktext=expiry_labels,
-        tickangle= -30,
+        tickangle=-30,
         automargin=True,
     ),
     yaxis=dict(
         title="Strike",
         tickmode="array",
         tickvals=y_pos,
-        ticktext=strike_labels,
-        autorange="reversed",  # highest strike appears at the top
+        ticktext=strike_labels_rev,
     ),
     height=700,
     margin=dict(l=120, r=20, t=80, b=120),
