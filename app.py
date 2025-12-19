@@ -11,7 +11,6 @@ st.set_page_config(page_title="Options Net-OI Heatmap", layout="wide")
 # HELPERS
 # =============================
 def format_oi_value(val):
-    # Format numeric values for annotations
     try:
         v = int(val)
     except Exception:
@@ -22,14 +21,13 @@ def format_oi_value(val):
         return f"{v/1_000:.1f}K"
     return f"{v:,}"
 
-# Don't cache objects that are not easily serializable (e.g. yf.Ticker)
+# Return fresh yf.Ticker (do not cache)
 def fetch_ticker(ticker_symbol: str):
-    # Return a fresh yf.Ticker each call (not cached)
     return yf.Ticker(ticker_symbol)
 
+# Cache only primitive/serializable price (float)
 @st.cache_data(show_spinner=False)
 def get_price(ticker_symbol: str):
-    # Cache the numeric price (serializable float)
     t = yf.Ticker(ticker_symbol)
     hist = t.history(period="1d")
     if hist.empty:
@@ -37,7 +35,6 @@ def get_price(ticker_symbol: str):
     return float(hist["Close"].iloc[-1])
 
 def get_option_chain_for_expiry(ticker, expiry):
-    # Don't cache the Ticker or chain object; return DataFrames directly
     try:
         chain = ticker.option_chain(expiry)
         return chain.calls.copy(), chain.puts.copy()
@@ -48,21 +45,28 @@ def get_option_chain_for_expiry(ticker, expiry):
 # SIDEBAR / INPUTS
 # =============================
 st.title("Options Net Open Interest Heatmap")
-st.markdown("Visualize binned Net Open Interest (Calls − Puts) across strikes and upcoming expiries.")
+st.markdown("Visualize Net Open Interest (Calls − Puts) across actual strikes and expiries.")
 
 col_inputs, col_info = st.columns([1, 2])
 
 with col_inputs:
     symbol = st.text_input("Ticker symbol", value="AAPL").upper().strip()
-    BIN_SIZE = st.number_input("Bin size (strike step)", min_value=1, max_value=100, value=5, step=1)
-    STRIKE_RANGE = st.number_input("Strike bins either side of center (count)", min_value=1, max_value=100, value=20, step=1)
-    EXPIRY_COUNT = st.slider("Number of expiries to include", min_value=1, max_value=12, value=4)
+    STRIKE_RANGE = st.number_input(
+        "Strikes above / below current price (count)",
+        min_value=1,
+        max_value=200,
+        value=20,
+        step=1,
+    )
+    EXPIRY_COUNT = st.slider(
+        "Number of expiries to include", min_value=1, max_value=24, value=4
+    )
     refresh = st.button("Update")
 
 with col_info:
     st.markdown("Usage tips:")
-    st.markdown("- Try liquid tickers (AAPL, SPY) for richer option chains.")
-    st.markdown("- Increase bin size to aggregate wider strike ranges.")
+    st.markdown("- Shows actual strike levels (no binning).")
+    st.markdown("- Choose how many strikes above and below current price to show.")
     st.markdown(f"- Report generated: {datetime.utcnow().isoformat(timespec='seconds')} UTC")
 
 if not symbol:
@@ -72,8 +76,6 @@ if not symbol:
 # =============================
 # FETCH DATA
 # =============================
-# Use get_price (cached for numeric return) and fetch_ticker (non-cached)
-price = None
 with st.spinner(f"Fetching data for {symbol} ..."):
     price = get_price(symbol)
     ticker = fetch_ticker(symbol)
@@ -83,7 +85,9 @@ with st.spinner(f"Fetching data for {symbol} ..."):
         all_expiries = []
 
 if price is None:
-    st.error(f"Could not fetch price or options for '{symbol}'. Check the ticker and try again.")
+    st.error(
+        f"Could not fetch price or options for '{symbol}'. Check the ticker and try again."
+    )
     st.stop()
 
 if not all_expiries:
@@ -99,26 +103,20 @@ for expiry in expiries:
     if calls is None or puts is None:
         continue
 
-    # Ensure numeric strike & openInterest columns exist
+    # Ensure strike & openInterest columns exist
     if "strike" not in calls.columns or "openInterest" not in calls.columns:
         continue
     if "strike" not in puts.columns or "openInterest" not in puts.columns:
         continue
 
-    # Bin strikes
-    calls = calls.copy()
-    puts = puts.copy()
-
-    calls["bin"] = (calls["strike"] // BIN_SIZE) * BIN_SIZE
-    puts["bin"] = (puts["strike"] // BIN_SIZE) * BIN_SIZE
-
-    call_oi = calls.groupby("bin")["openInterest"].sum()
-    put_oi = puts.groupby("bin")["openInterest"].sum()
+    # Group by the actual strike (no binning)
+    call_oi = calls.groupby("strike")["openInterest"].sum()
+    put_oi = puts.groupby("strike")["openInterest"].sum()
 
     net_oi = call_oi.subtract(put_oi, fill_value=0)
 
     df = net_oi.reset_index()
-    df.columns = ["strike_bin", "net_oi"]
+    df.columns = ["strike", "net_oi"]
     df["expiry"] = expiry
 
     all_data.append(df)
@@ -130,24 +128,38 @@ if not all_data:
 nodes = pd.concat(all_data, ignore_index=True)
 
 # =============================
-# LIMIT TO STRIKES AROUND PRICE
+# SELECT STRIKES AROUND PRICE (actual strikes)
 # =============================
-nodes["dist"] = (nodes["strike_bin"] - price).abs()
-center_row = nodes.loc[nodes["dist"].idxmin()]
-center_bin = int(center_row["strike_bin"])
+unique_strikes = np.sort(nodes["strike"].unique())
+if unique_strikes.size == 0:
+    st.error("No strikes found in the option chains.")
+    st.stop()
 
-valid_bins = [center_bin + i * BIN_SIZE for i in range(-STRIKE_RANGE, STRIKE_RANGE + 1)]
-nodes = nodes[nodes["strike_bin"].isin(valid_bins)]
+# find the strike index closest to current price
+closest_idx = int(np.abs(unique_strikes - price).argmin())
+
+# compute window of strikes: STRIKE_RANGE below and above
+low_idx = max(0, closest_idx - STRIKE_RANGE)
+high_idx = min(len(unique_strikes) - 1, closest_idx + STRIKE_RANGE)
+selected_strikes = unique_strikes[low_idx : high_idx + 1]  # inclusive
+
+# filter nodes to only those strikes
+nodes = nodes[nodes["strike"].isin(selected_strikes)].copy()
 
 if nodes.empty:
-    st.error("No binned nodes remained after limiting to the strike range. Try increasing the strike range or bin size.")
+    st.error("No nodes after selecting strikes around price. Try expanding the strike range.")
     st.stop()
 
 # =============================
-# BUILD HEATMAP
+# BUILD HEATMAP (Option 1: sort ascending and use reversed y-axis)
 # =============================
-heatmap = nodes.pivot_table(index="strike_bin", columns="expiry", values="net_oi", aggfunc="sum").fillna(0)
+heatmap = nodes.pivot_table(index="strike", columns="expiry", values="net_oi", aggfunc="sum").fillna(0)
+# sort strikes ascending so we can reverse axis in Plotly (highest will display at top)
 heatmap = heatmap.sort_index(ascending=True)
+
+# format expiry labels (date-only)
+expiry_display = [pd.to_datetime(x).date().isoformat() for x in heatmap.columns]
+expiry_to_display = {orig: disp for orig, disp in zip(heatmap.columns, expiry_display)}
 
 # =============================
 # FIND KING CALL & KING PUT NODES
@@ -155,15 +167,17 @@ heatmap = heatmap.sort_index(ascending=True)
 king_call = {}
 king_put = {}
 for col in heatmap.columns:
-    column_vals = heatmap[col]
-    king_call[col] = int(column_vals.idxmax())
-    king_put[col] = int(column_vals.idxmin())
+    col_series = heatmap[col]
+    if col_series.size == 0:
+        continue
+    king_call[col] = int(col_series.idxmax())
+    king_put[col] = int(col_series.idxmin())
 
 # =============================
 # PREPARE PLOTLY HEATMAP
 # =============================
 z = heatmap.values
-x = [str(c) for c in heatmap.columns]
+x = [expiry_to_display[c] for c in heatmap.columns]
 y = [int(v) for v in heatmap.index]
 
 # Build text annotations (formatted)
@@ -176,10 +190,51 @@ for i, strike in enumerate(y):
         row.append(label)
     text.append(row)
 
+# Prepare overlay text: non-king and king labels
+non_king_x = []
+non_king_y = []
+non_king_text = []
+non_king_font_color = []
+max_abs_z = np.nanmax(np.abs(z)) if z.size else 0
+
+for i, strike in enumerate(y):
+    for j, expiry in enumerate(heatmap.columns):
+        val = z[i, j]
+        label = format_oi_value(val)
+        strike_val = strike
+        expiry_val = expiry
+        if (expiry_val in king_call and strike_val == king_call[expiry_val]) or (
+            expiry_val in king_put and strike_val == king_put[expiry_val]
+        ):
+            continue
+        non_king_x.append(expiry_to_display[expiry_val])
+        non_king_y.append(strike_val)
+        non_king_text.append(label)
+        non_king_font_color.append(
+            "black" if abs(val) < (max_abs_z * 0.35 if max_abs_z > 0 else 1) else "white"
+        )
+
+# king labels (bigger and white)
+king_x = []
+king_y = []
+king_texts = []
+for j, expiry in enumerate(heatmap.columns):
+    for kind, strike in [("call", king_call.get(expiry)), ("put", king_put.get(expiry))]:
+        if strike is None:
+            continue
+        king_x.append(expiry_to_display[expiry])
+        king_y.append(int(strike))
+        try:
+            idx_row = list(y).index(int(strike))
+            val = z[idx_row, j]
+        except ValueError:
+            val = 0
+        king_texts.append(format_oi_value(val))
+
 colorscale = [
     [0.0, "rgb(165,0,38)"],
     [0.5, "rgb(255,255,191)"],
-    [1.0, "rgb(0,104,55)"]
+    [1.0, "rgb(0,104,55)"],
 ]
 
 fig = go.Figure(
@@ -188,31 +243,12 @@ fig = go.Figure(
         x=x,
         y=y,
         text=text,
-        hovertemplate="<b>Expiry:</b> %{x}<br><b>Strike bin:</b> %{y}<br><b>Net OI:</b> %{z}<extra></extra>",
+        hovertemplate="<b>Expiry:</b> %{x}<br><b>Strike:</b> %{y}<br><b>Net OI:</b> %{z}<extra></extra>",
         colorscale=colorscale,
         colorbar=dict(title="Net Open Interest (Calls − Puts)"),
-        zmid=0
+        zmid=0,
     )
 )
-
-# non-king labels
-non_king_x = []
-non_king_y = []
-non_king_text = []
-non_king_font_color = []
-max_abs_z = np.nanmax(np.abs(z)) if z.size else 0
-for i, strike in enumerate(y):
-    for j, expiry in enumerate(heatmap.columns):
-        strike_val = strike
-        expiry_val = expiry
-        val = z[i, j]
-        label = format_oi_value(val)
-        if strike_val == king_call[expiry_val] or strike_val == king_put[expiry_val]:
-            continue
-        non_king_x.append(str(expiry_val))
-        non_king_y.append(strike_val)
-        non_king_text.append(label)
-        non_king_font_color.append("black" if abs(val) < (max_abs_z * 0.35 if max_abs_z>0 else 1) else "white")
 
 fig.add_trace(
     go.Scatter(
@@ -222,21 +258,9 @@ fig.add_trace(
         text=non_king_text,
         textfont=dict(color=non_king_font_color, size=10),
         hoverinfo="skip",
-        showlegend=False
+        showlegend=False,
     )
 )
-
-# king labels (bigger and white)
-king_x = []
-king_y = []
-king_texts = []
-for j, expiry in enumerate(heatmap.columns):
-    for kind, strike in [("call", king_call[expiry]), ("put", king_put[expiry])]:
-        king_x.append(str(expiry))
-        king_y.append(str(strike))
-        idx_row = list(y).index(strike)
-        val = z[idx_row, j]
-        king_texts.append(format_oi_value(val))
 
 fig.add_trace(
     go.Scatter(
@@ -246,15 +270,15 @@ fig.add_trace(
         text=king_texts,
         textfont=dict(color="white", size=12, family="Arial", weight="bold"),
         hoverinfo="skip",
-        showlegend=False
+        showlegend=False,
     )
 )
 
 fig.update_layout(
     title=f"{symbol} | Price: {price:.2f} | Net OI Heatmap (King Call & Put Nodes)",
-    xaxis_title="Expiry",
-    yaxis_title="Strike Bin",
-    yaxis_autorange="reversed",
+    xaxis_title="Expiry (date)",
+    yaxis_title="Strike",
+    yaxis=dict(autorange="reversed"),  # Option 1: highest prices appear at the top
     height=700,
     margin=dict(l=120, r=20, t=80, b=120),
 )
@@ -263,17 +287,24 @@ fig.update_layout(
 # SHOW SUMMARY & PLOT
 # =============================
 st.subheader(f"{symbol}  •  Price: {price:.2f}")
-st.markdown(f"Showing {len(heatmap.index)} strike bins and {len(heatmap.columns)} expiries")
+st.markdown(f"Showing {len(heatmap.index)} strike levels and {len(heatmap.columns)} expiries")
 
 with st.expander("King nodes (by expiry)"):
     rows = []
     for expiry in heatmap.columns:
-        rows.append(f"- {expiry}: King Call = {king_call[expiry]}, King Put = {king_put[expiry]}")
+        rows.append(
+            f"- {expiry_to_display[expiry]}: King Call = {king_call.get(expiry)}, King Put = {king_put.get(expiry)}"
+        )
     st.markdown("\n".join(rows))
 
 st.plotly_chart(fig, use_container_width=True)
 
 # Option to download CSV
-csv = nodes[["expiry", "strike_bin", "net_oi"]].sort_values(["expiry", "strike_bin"])
+csv = nodes[["expiry", "strike", "net_oi"]].sort_values(["expiry", "strike"])
 csv_bytes = csv.to_csv(index=False).encode("utf-8")
-st.download_button("Download CSV of binned net OI", data=csv_bytes, file_name=f"{symbol}_net_oi_{datetime.utcnow().date()}.csv", mime="text/csv")
+st.download_button(
+    "Download CSV of net OI by strike",
+    data=csv_bytes,
+    file_name=f"{symbol}_net_oi_{datetime.utcnow().date()}.csv",
+    mime="text/csv",
+)
