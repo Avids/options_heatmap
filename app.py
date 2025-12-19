@@ -147,7 +147,7 @@ if nodes.empty:
 # BUILD HEATMAP
 # =============================
 heatmap = nodes.pivot_table(index="strike_bin", columns="expiry", values="net_oi", aggfunc="sum").fillna(0)
-heatmap = heatmap.sort_index(ascending=False)
+heatmap = heatmap.sort_index(ascending=True)
 
 # =============================
 # FIND KING CALL & KING PUT NODES
