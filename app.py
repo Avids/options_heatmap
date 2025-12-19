@@ -22,20 +22,22 @@ def format_oi_value(val):
         return f"{v/1_000:.1f}K"
     return f"{v:,}"
 
-@st.cache_data(show_spinner=False)
+# Don't cache objects that are not easily serializable (e.g. yf.Ticker)
 def fetch_ticker(ticker_symbol: str):
-    ticker = yf.Ticker(ticker_symbol)
-    return ticker
+    # Return a fresh yf.Ticker each call (not cached)
+    return yf.Ticker(ticker_symbol)
 
 @st.cache_data(show_spinner=False)
-def get_price(ticker):
-    hist = ticker.history(period="1d")
+def get_price(ticker_symbol: str):
+    # Cache the numeric price (serializable float)
+    t = yf.Ticker(ticker_symbol)
+    hist = t.history(period="1d")
     if hist.empty:
         return None
-    return hist["Close"].iloc[-1]
+    return float(hist["Close"].iloc[-1])
 
-@st.cache_data(show_spinner=False)
 def get_option_chain_for_expiry(ticker, expiry):
+    # Don't cache the Ticker or chain object; return DataFrames directly
     try:
         chain = ticker.option_chain(expiry)
         return chain.calls.copy(), chain.puts.copy()
@@ -70,10 +72,11 @@ if not symbol:
 # =============================
 # FETCH DATA
 # =============================
-ticker = fetch_ticker(symbol)
-
+# Use get_price (cached for numeric return) and fetch_ticker (non-cached)
+price = None
 with st.spinner(f"Fetching data for {symbol} ..."):
-    price = get_price(ticker)
+    price = get_price(symbol)
+    ticker = fetch_ticker(symbol)
     try:
         all_expiries = list(ticker.options)
     except Exception:
@@ -103,7 +106,6 @@ for expiry in expiries:
         continue
 
     # Bin strikes
-    # Use integer floor division by bin to create bins aligned to BIN_SIZE
     calls = calls.copy()
     puts = puts.copy()
 
@@ -131,7 +133,6 @@ nodes = pd.concat(all_data, ignore_index=True)
 # LIMIT TO STRIKES AROUND PRICE
 # =============================
 nodes["dist"] = (nodes["strike_bin"] - price).abs()
-# choose the center bin nearest to current price
 center_row = nodes.loc[nodes["dist"].idxmin()]
 center_bin = int(center_row["strike_bin"])
 
@@ -175,23 +176,6 @@ for i, strike in enumerate(y):
         row.append(label)
     text.append(row)
 
-# Create annotation style: emphasize kings
-annotations = []
-for j, expiry in enumerate(heatmap.columns):
-    call_strike = king_call[expiry]
-    put_strike = king_put[expiry]
-    for i, strike in enumerate(y):
-        if strike == call_strike or strike == put_strike:
-            annotations.append(
-                dict(
-                    x=str(expiry),
-                    y=strike,
-                    text=format_oi_value(z[i, j]),
-                    showarrow=False,
-                    font=dict(color="white", size=12, family="Arial", weight="bold"),
-                )
-            )
-
 colorscale = [
     [0.0, "rgb(165,0,38)"],
     [0.5, "rgb(255,255,191)"],
@@ -211,13 +195,12 @@ fig = go.Figure(
     )
 )
 
-# add annotations for each cell (non-king uses smaller dark/black text automatically from text on heatmap overlay)
-# We'll add textual overlay using separate scatter traces for better styling:
 # non-king labels
 non_king_x = []
 non_king_y = []
 non_king_text = []
 non_king_font_color = []
+max_abs_z = np.nanmax(np.abs(z)) if z.size else 0
 for i, strike in enumerate(y):
     for j, expiry in enumerate(heatmap.columns):
         strike_val = strike
@@ -229,7 +212,7 @@ for i, strike in enumerate(y):
         non_king_x.append(str(expiry_val))
         non_king_y.append(strike_val)
         non_king_text.append(label)
-        non_king_font_color.append("black" if abs(val) < (np.nanmax(np.abs(z)) * 0.35 if np.nanmax(np.abs(z))>0 else 1) else "white")
+        non_king_font_color.append("black" if abs(val) < (max_abs_z * 0.35 if max_abs_z>0 else 1) else "white")
 
 fig.add_trace(
     go.Scatter(
@@ -251,7 +234,6 @@ for j, expiry in enumerate(heatmap.columns):
     for kind, strike in [("call", king_call[expiry]), ("put", king_put[expiry])]:
         king_x.append(str(expiry))
         king_y.append(str(strike))
-        # annotate with existing formatted value (we'll also add a small symbol)
         idx_row = list(y).index(strike)
         val = z[idx_row, j]
         king_texts.append(format_oi_value(val))
