@@ -404,9 +404,9 @@ fig.text(
     "EpicOptions",
     ha="right",
     va="bottom",
-    fontsize=8,
+    fontsize=9,
     color="gray",
-    alpha=0.8
+    alpha=0.9
 )
 
 # summary 
