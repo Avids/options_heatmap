@@ -331,11 +331,6 @@ elif METRIC == "Dollar GEX":
 else:
     value_col = "net_oi"
 
-# summary 
-st.subheader(f"{symbol}  •  Price: {price:.2f}")
-st.markdown(f"Metric: **{METRIC}** — Showing {heatmap.shape[0]} strike levels and {heatmap.shape[1]} expiries")
-
-
 
 # build heatmap (descending so highest on top)
 expiry_type_label = OPTION_TYPE
@@ -414,6 +409,9 @@ fig.text(
     alpha=0.8
 )
 
+# summary 
+st.subheader(f"{symbol}  •  Price: {price:.2f}")
+st.markdown(f"Metric: **{METRIC}** — Showing {heatmap.shape[0]} strike levels and {heatmap.shape[1]} expiries")
 
 plt.tight_layout()
 
