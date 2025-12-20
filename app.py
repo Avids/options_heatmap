@@ -395,7 +395,7 @@ for i in range(z.shape[0]):
         ax.text(j, i, txt, ha="center", va="center", color=text_color, fontsize=fontsize, fontweight=fontweight)
 
         if is_king:
-            rect = plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False, edgecolor="white", linewidth=1.5)
+            rect = plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False, edgecolor="black", linewidth=1.5)
             ax.add_patch(rect)
 
 # watermark
