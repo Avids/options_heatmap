@@ -346,15 +346,24 @@ for col in heatmap.columns:
     king_put[col] = float(col_series.idxmin())
 
 # plot
-fig, ax = plt.subplots(figsize=(12, max(6, len(strike_labels) * 0.18)))
+fig, ax = plt.subplots(figsize=(12, max(8, len(strike_labels) * 0.25)))
 cmap = plt.get_cmap("RdYlGn")
 max_abs = np.nanmax(np.abs(z)) if z.size else 1
 norm = colors.TwoSlopeNorm(vmin=-max_abs, vcenter=0, vmax=max_abs)
 im = ax.imshow(z, aspect="auto", cmap=cmap, norm=norm, origin="upper")
+
+# Increase spacing between cells
 ax.set_xticks(np.arange(len(expiry_labels)))
 ax.set_xticklabels(expiry_labels, rotation=30, ha="right")
 ax.set_yticks(np.arange(len(strike_labels)))
 ax.set_yticklabels(strike_labels)
+
+# Add gridlines to create cell separation
+ax.set_xticks(np.arange(len(expiry_labels)) - 0.5, minor=True)
+ax.set_yticks(np.arange(len(strike_labels)) - 0.5, minor=True)
+ax.grid(which="minor", color="white", linestyle='-', linewidth=2)
+ax.tick_params(which="minor", size=0)
+
 ax.set_xlabel("Expiry (date)")
 ax.set_ylabel("Strike")
 ax.set_title(
