@@ -333,7 +333,8 @@ else:
 
 # summary 
 st.subheader(f"{symbol}  •  Price: {price:.2f}")
-st.markdown(f"Metric: **{METRIC}** — Showing {len(strike_labels)} strike levels and {len(expiry_labels)} expiries")
+st.markdown(f"Metric: **{METRIC}** — Showing {heatmap.shape[0]} strike levels and {heatmap.shape[1]} expiries")
+
 
 
 # build heatmap (descending so highest on top)
