@@ -211,11 +211,31 @@ if missing_iv_count > 0:
 # =============================
 # COMPUTE GEX / DOLLAR GEX
 # =============================
-# compute time-to-expiry in years
-today = pd.Timestamp.utcnow().normalize()
-nodes["expiry_dt"] = pd.to_datetime(nodes["expiry"])
+# compute expiry datetimes and time-to-expiry T (in years) robustly (handle tz-aware or tz-naive)
+nodes["expiry_dt"] = pd.to_datetime(nodes["expiry"], errors="coerce")
+
+# drop any rows with unparsable expiry
+nodes = nodes[nodes["expiry_dt"].notna()].copy()
+
+# If expiry_dt is timezone-aware, convert to UTC then drop tz info.
+# If tz-naive, leave as-is.
+try:
+    # pandas Series.dt.tz returns timezone if tz-aware, else None
+    if nodes["expiry_dt"].dt.tz is not None:
+        nodes["expiry_dt"] = nodes["expiry_dt"].dt.tz_convert("UTC").dt.tz_localize(None)
+except Exception:
+    # fallback: attempt to remove tz if present
+    nodes["expiry_dt"] = nodes["expiry_dt"].dt.tz_convert("UTC").dt.tz_localize(None) if hasattr(nodes["expiry_dt"].dt, "tz") else nodes["expiry_dt"]
+
+# Use UTC now as a naive timestamp (no tz info) for subtraction
+today = pd.Timestamp.utcnow()
+if getattr(today, "tzinfo", None) is not None:
+    today = today.tz_convert("UTC").tz_localize(None)
+
+# compute T in years; clip negatives to 0
 nodes["T"] = (nodes["expiry_dt"] - today).dt.total_seconds() / (365.0 * 24 * 3600)
 nodes["T"] = nodes["T"].clip(lower=0.0)
+# =======================================================================
 
 # compute gamma per share using implied vol (iv is expected as decimal, e.g., 0.25)
 nodes["gamma_per_share"] = nodes.apply(
