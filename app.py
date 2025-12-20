@@ -391,6 +391,18 @@ for i in range(z.shape[0]):
             rect = plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False, edgecolor="white", linewidth=1.5)
             ax.add_patch(rect)
 
+# watermark
+fig.text(
+    0.99, 0.01,
+    "EpicOptions",
+    ha="right",
+    va="bottom",
+    fontsize=8,
+    color="gray",
+    alpha=0.7
+)
+
+
 plt.tight_layout()
 
 st.pyplot(fig)
