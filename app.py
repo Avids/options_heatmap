@@ -90,7 +90,7 @@ with col_inputs:
         step=1,
     )
     EXPIRY_COUNT = st.slider(
-        "Number of expiries to include (max 12)", min_value=1, max_value=12, value=4
+        "Number of expiries to include (max 12)", min_value=1, max_value=12, value=3
     )
     refresh = st.button("Update (re-fetch)")
 
