@@ -76,6 +76,12 @@ with col_inputs:
         "Metric",
         options=["Open Interest", "Volume", "GEX (shares)", "Dollar GEX"]
     )
+    # ======= Option type selector ====
+
+    OPTION_TYPE = st.selectbox(
+    "Option type",
+    options=["Weekly", "Monthly", "Weekly + Monthly"]
+    )
     STRIKE_RANGE = st.number_input(
         "Strikes above / below current price (count)",
         min_value=1,
@@ -125,12 +131,7 @@ with st.expander("About / Help", expanded=False):
     - Data comes from Yahoo via yfinance and may be incomplete.
     - GEX accuracy depends on available implied vol; missing IVs are warned and handled.
     """)
-# ======= Option type selector ====
 
-OPTION_TYPE = st.selectbox(
-    "Option type",
-    options=["Weekly", "Monthly", "Weekly + Monthly"]
-)
 
 
 # =============================
@@ -331,6 +332,8 @@ else:
     value_col = "net_oi"
 
 # build heatmap (descending so highest on top)
+expiry_type_label = OPTION_TYPE
+
 heatmap = nodes.pivot_table(index="strike", columns="expiry", values=value_col, aggfunc="sum").fillna(0)
 heatmap = heatmap.sort_index(ascending=False)
 
@@ -360,7 +363,10 @@ ax.set_yticks(np.arange(len(strike_labels)))
 ax.set_yticklabels(strike_labels)
 ax.set_xlabel("Expiry (date)")
 ax.set_ylabel("Strike")
-ax.set_title(f"{symbol} | Price: {price:.2f} | Net {METRIC} Heatmap (King Call & Put Nodes)")
+ax.set_title(
+    f"{symbol} | {expiry_type_label} Options | Price: {price:.2f} | Net {METRIC} Heatmap"
+)
+
 
 cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.04)
 cbar.set_label(f"Net {METRIC} (Calls − Puts)")
