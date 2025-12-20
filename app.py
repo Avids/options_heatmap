@@ -2,10 +2,11 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+from matplotlib import colors
 from datetime import datetime
 
-st.set_page_config(page_title="Options Net-OI/Volume Heatmap", layout="wide")
+st.set_page_config(page_title="Options Net Heatmap (Static)", layout="wide")
 
 # =============================
 # HELPERS
@@ -22,7 +23,6 @@ def format_oi_value(val):
     return f"{v:,}"
 
 def fetch_ticker(ticker_symbol: str):
-    # Do not cache the Ticker object (not serializable)
     return yf.Ticker(ticker_symbol)
 
 @st.cache_data(show_spinner=False)
@@ -43,8 +43,8 @@ def get_option_chain_for_expiry(ticker, expiry):
 # =============================
 # SIDEBAR / INPUTS
 # =============================
-st.title("Options Net Heatmap (Open Interest or Volume)")
-st.markdown("Visualize Net Open Interest or Net Volume (Calls − Puts) across actual strikes and expiries.")
+st.title("Options Net Heatmap (static matplotlib)")
+st.markdown("Visualize Net Open Interest or Net Volume (Calls − Puts) across actual strikes and expiries using a static chart.")
 
 col_inputs, col_info = st.columns([1, 2])
 
@@ -61,12 +61,12 @@ with col_inputs:
     EXPIRY_COUNT = st.slider(
         "Number of expiries to include", min_value=1, max_value=24, value=4
     )
-    refresh = st.button("Update")
+    refresh = st.button("Update (re-fetch)")
 
 with col_info:
     st.markdown("Usage tips:")
     st.markdown("- Choose metric: Open Interest (openInterest) or Volume (volume).")
-    st.markdown("- Shows actual strike levels (no binning).")
+    st.markdown("- Displays actual strike levels (no binning).")
     st.markdown("- Choose how many strikes above and below current price to show.")
     st.markdown(f"- Report generated: {datetime.utcnow().isoformat(timespec='seconds')} UTC")
 
@@ -106,7 +106,6 @@ for expiry in expiries:
     if calls is None or puts is None:
         continue
 
-    # Ensure strike column exists
     if "strike" not in calls.columns or "strike" not in puts.columns:
         continue
 
@@ -122,10 +121,8 @@ for expiry in expiries:
             st.warning("Volume column not present on some option chains; treating missing values as 0.")
             missing_metric_warned = True
 
-    # Group by strike and sum the metric
     call_vals = calls.groupby("strike")[metric_col].sum()
     put_vals = puts.groupby("strike")[metric_col].sum()
-
     net = call_vals.subtract(put_vals, fill_value=0)
 
     df = net.reset_index()
@@ -154,37 +151,25 @@ high_idx = min(len(unique_strikes) - 1, closest_idx + STRIKE_RANGE)
 selected_strikes = unique_strikes[low_idx : high_idx + 1]
 
 nodes = nodes[nodes["strike"].isin(selected_strikes)].copy()
-
 if nodes.empty:
     st.error("No nodes after selecting strikes around price. Try expanding the strike range.")
     st.stop()
 
 # =============================
-# BUILD HEATMAP (simpler approach: sort DESC so top is highest strike)
+# BUILD HEATMAP (sort descending so top is highest strike)
 # =============================
 heatmap = nodes.pivot_table(index="strike", columns="expiry", values="net_metric", aggfunc="sum").fillna(0)
 
-# sort strikes descending so highest strike is first row (displayed at top)
+# sort descending -> highest strike first row (will display at top with origin='upper')
 heatmap = heatmap.sort_index(ascending=False)
 
 expiry_labels = [pd.to_datetime(x).date().isoformat() for x in heatmap.columns]
-strike_labels = [str(int(s)) for s in heatmap.index]  # highest->lowest order
+strike_labels = [str(int(s)) for s in heatmap.index]  # highest -> lowest
 
-z = heatmap.values  # rows correspond to strike_labels in same order (highest->lowest)
-
-n_rows, n_cols = z.shape
-x_pos = list(range(n_cols))
-y_pos = list(range(n_rows))
-
-# customdata shaped (n_rows, n_cols, 2) for hover (expiry label, strike label)
-customdata = np.empty((n_rows, n_cols, 2), dtype=object)
-for i in range(n_rows):
-    for j in range(n_cols):
-        customdata[i, j, 0] = expiry_labels[j]
-        customdata[i, j, 1] = strike_labels[i]
+z = heatmap.values  # rows = strike_labels order highest->lowest
 
 # =============================
-# KING NODES (based on net_metric)
+# FIND KING CALL & KING PUT NODES
 # =============================
 king_call = {}
 king_put = {}
@@ -196,109 +181,64 @@ for col in heatmap.columns:
     king_put[col] = int(col_series.idxmin())
 
 # =============================
-# PLOTLY HEATMAP
+# PLOT (matplotlib static)
 # =============================
-fig = go.Figure(
-    data=go.Heatmap(
-        z=z,
-        x=x_pos,
-        y=y_pos,
-        customdata=customdata,
-        colorscale=[
-            [0.0, "rgb(165,0,38)"],
-            [0.5, "rgb(255,255,191)"],
-            [1.0, "rgb(0,104,55)"],
-        ],
-        colorbar=dict(title=colorbar_title),
-        zmid=0,
-        hovertemplate="<b>Expiry:</b> %{customdata[0]}<br><b>Strike:</b> %{customdata[1]}<br><b>Net:</b> %{z}<extra></extra>",
-    )
-)
+fig, ax = plt.subplots(figsize=(12, max(6, len(strike_labels) * 0.18)))
 
-# overlay text (non-king)
-text_matrix = [[format_oi_value(z[i, j]) for j in range(n_cols)] for i in range(n_rows)]
-max_abs_z = np.nanmax(np.abs(z)) if z.size else 0
+# colormap and normalization centered at zero
+cmap = plt.get_cmap("RdYlGn")
+# symmetric norm around 0 for good divergence coloring
+max_abs = np.nanmax(np.abs(z)) if z.size else 1
+norm = colors.TwoSlopeNorm(vmin=-max_abs, vcenter=0, vmax=max_abs)
 
-non_king_x = []
-non_king_y = []
-non_king_text = []
-non_king_color = []
+im = ax.imshow(z, aspect="auto", cmap=cmap, norm=norm, origin="upper")
 
-for i in range(n_rows):
-    for j in range(n_cols):
+# ticks
+ax.set_xticks(np.arange(len(expiry_labels)))
+ax.set_xticklabels(expiry_labels, rotation=30, ha="right")
+ax.set_yticks(np.arange(len(strike_labels)))
+ax.set_yticklabels(strike_labels)
+
+ax.set_xlabel("Expiry (date)")
+ax.set_ylabel("Strike")
+ax.set_title(f"{symbol} | Price: {price:.2f} | Net {METRIC} Heatmap (King Call & Put Nodes)")
+
+# add colorbar
+cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.04)
+cbar.set_label(colorbar_title)
+
+# annotations (text) and king highlights
+# choose threshold for text color contrast
+for i in range(z.shape[0]):
+    for j in range(z.shape[1]):
+        val = z[i, j]
+        txt = format_oi_value(val)
+        # find if this cell is king call or king put
         strike_val = int(heatmap.index[i])
         expiry_val = heatmap.columns[j]
-        if (expiry_val in king_call and strike_val == king_call[expiry_val]) or (
+        is_king = (expiry_val in king_call and strike_val == king_call[expiry_val]) or (
             expiry_val in king_put and strike_val == king_put[expiry_val]
-        ):
-            continue
-        non_king_x.append(j)
-        non_king_y.append(i)
-        non_king_text.append(text_matrix[i][j])
-        non_king_color.append("black" if abs(z[i, j]) < (max_abs_z * 0.35 if max_abs_z > 0 else 1) else "white")
+        )
 
-fig.add_trace(
-    go.Scatter(
-        x=non_king_x,
-        y=non_king_y,
-        mode="text",
-        text=non_king_text,
-        textfont=dict(color=non_king_color, size=10),
-        hoverinfo="skip",
-        showlegend=False,
-    )
-)
+        # text color depends on background intensity
+        text_color = "white" if abs(val) > (max_abs * 0.35) else "black"
+        fontweight = "bold" if is_king else "normal"
+        fontsize = 10 if is_king else 8
 
-# king labels (bigger)
-king_x = []
-king_y = []
-king_texts = []
-for j, expiry in enumerate(heatmap.columns):
-    for kind, strike in [("call", king_call.get(expiry)), ("put", king_put.get(expiry))]:
-        if strike is None:
-            continue
-        try:
-            i = list(heatmap.index).index(strike)
-        except ValueError:
-            continue
-        king_x.append(j)
-        king_y.append(i)
-        king_texts.append(format_oi_value(z[i, j]))
+        ax.text(j, i, txt, ha="center", va="center", color=text_color, fontsize=fontsize, fontweight=fontweight)
 
-fig.add_trace(
-    go.Scatter(
-        x=king_x,
-        y=king_y,
-        mode="text",
-        text=king_texts,
-        textfont=dict(color="white", size=12, family="Arial", weight="bold"),
-        hoverinfo="skip",
-        showlegend=False,
-    )
-)
+        # draw a rectangle around king cells
+        if is_king:
+            rect = plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False, edgecolor="white", linewidth=1.5)
+            ax.add_patch(rect)
 
-fig.update_layout(
-    title=f"{symbol} | Price: {price:.2f} | Net {METRIC} Heatmap (King Call & Put Nodes)",
-    xaxis=dict(
-        title="Expiry (date)",
-        tickmode="array",
-        tickvals=x_pos,
-        ticktext=expiry_labels,
-        tickangle=-30,
-        automargin=True,
-    ),
-    yaxis=dict(
-        title="Strike",
-        tickmode="array",
-        tickvals=y_pos,
-        ticktext=strike_labels,
-    ),
-    height=700,
-    margin=dict(l=120, r=20, t=80, b=120),
-)
+plt.tight_layout()
+
+# display static chart in Streamlit
+st.pyplot(fig)
 
 # =============================
-# SHOW SUMMARY & PLOT
+# SUMMARY & DOWNLOAD
 # =============================
 st.subheader(f"{symbol}  •  Price: {price:.2f}")
 st.markdown(f"Metric: **{METRIC}** — Showing {len(strike_labels)} strike levels and {len(expiry_labels)} expiries")
@@ -311,9 +251,6 @@ with st.expander("King nodes (by expiry)"):
         )
     st.markdown("\n".join(rows))
 
-st.plotly_chart(fig, use_container_width=True)
-
-# Option to download CSV (include metric name)
 csv = nodes[["expiry", "strike", "net_metric"]].sort_values(["expiry", "strike"])
 csv = csv.rename(columns={"net_metric": f"net_{METRIC.replace(' ', '_').lower()}"})
 csv_bytes = csv.to_csv(index=False).encode("utf-8")
