@@ -331,6 +331,11 @@ elif METRIC == "Dollar GEX":
 else:
     value_col = "net_oi"
 
+# summary 
+st.subheader(f"{symbol}  •  Price: {price:.2f}")
+st.markdown(f"Metric: **{METRIC}** — Showing {len(strike_labels)} strike levels and {len(expiry_labels)} expiries")
+
+
 # build heatmap (descending so highest on top)
 expiry_type_label = OPTION_TYPE
 
@@ -338,7 +343,13 @@ heatmap = nodes.pivot_table(index="strike", columns="expiry", values=value_col, 
 heatmap = heatmap.sort_index(ascending=False)
 
 expiry_labels = [pd.to_datetime(x).date().isoformat() for x in heatmap.columns]
-strike_labels = [str(int(s)) for s in heatmap.index]
+
+def format_strike(s):
+    return f"{s:.2f}".rstrip("0").rstrip(".")
+
+strike_labels = [format_strike(s) for s in heatmap.index]
+
+
 z = heatmap.values
 
 # king nodes
@@ -348,8 +359,8 @@ for col in heatmap.columns:
     col_series = heatmap[col]
     if col_series.size == 0:
         continue
-    king_call[col] = int(col_series.idxmax())
-    king_put[col] = int(col_series.idxmin())
+    king_call[col] = float(col_series.idxmax())
+    king_put[col] = float(col_series.idxmin())
 
 # plot
 fig, ax = plt.subplots(figsize=(12, max(6, len(strike_labels) * 0.18)))
@@ -375,7 +386,7 @@ for i in range(z.shape[0]):
     for j in range(z.shape[1]):
         val = z[i, j]
         txt = format_oi_value(val)
-        strike_val = int(heatmap.index[i])
+        strike_val = float(heatmap.index[i])
         expiry_val = heatmap.columns[j]
         is_king = (expiry_val in king_call and strike_val == king_call[expiry_val]) or (
             expiry_val in king_put and strike_val == king_put[expiry_val]
@@ -399,31 +410,10 @@ fig.text(
     va="bottom",
     fontsize=8,
     color="gray",
-    alpha=0.7
+    alpha=0.8
 )
 
 
 plt.tight_layout()
 
 st.pyplot(fig)
-
-# summary & download
-st.subheader(f"{symbol}  •  Price: {price:.2f}")
-st.markdown(f"Metric: **{METRIC}** — Showing {len(strike_labels)} strike levels and {len(expiry_labels)} expiries")
-
-with st.expander("King nodes (by expiry)"):
-    rows = []
-    for expiry in heatmap.columns:
-        rows.append(
-            f"- {pd.to_datetime(expiry).date().isoformat()}: King = {king_call.get(expiry)} (max), {king_put.get(expiry)} (min)"
-        )
-    st.markdown("\n".join(rows))
-
-csv = nodes[["expiry", "strike", "net_oi", "net_vol", "iv", "gamma_per_share", "gex_shares", "gex_dollar"]].sort_values(["expiry", "strike"])
-csv_bytes = csv.to_csv(index=False).encode("utf-8")
-st.download_button(
-    f"Download CSV (includes GEX columns)",
-    data=csv_bytes,
-    file_name=f"{symbol}_net_metrics_{datetime.utcnow().date()}.csv",
-    mime="text/csv",
-)
