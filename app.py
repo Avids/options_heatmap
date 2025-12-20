@@ -5,15 +5,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import colors
 from datetime import datetime
+from math import log, sqrt, exp, pi
 
-st.set_page_config(page_title="Options Net Heatmap (Static)", layout="wide")
+st.set_page_config(page_title="Options Net Heatmap (with GEX)", layout="wide")
 
 # =============================
-# HELPERS
+# CONSTANTS & HELPERS
 # =============================
+CONTRACT_SIZE = 100  # standard equity options
+
 def format_oi_value(val):
     try:
-        v = int(val)
+        v = int(round(val))
     except Exception:
         return ""
     if abs(v) >= 1_000_000:
@@ -40,17 +43,30 @@ def get_option_chain_for_expiry(ticker, expiry):
     except Exception:
         return None, None
 
+def bs_gamma(S, K, T, sigma):
+    """Black-Scholes gamma per share (no dividends), using pdf of normal."""
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    sqrtT = sqrt(T)
+    d1 = (log(S / K) + 0.5 * sigma * sigma * T) / (sigma * sqrtT)
+    pdf_d1 = exp(-0.5 * d1 * d1) / sqrt(2 * pi)
+    gamma = pdf_d1 / (S * sigma * sqrtT)
+    return float(gamma)
+
 # =============================
 # SIDEBAR / INPUTS
 # =============================
-st.title("Options Net Heatmap (static matplotlib)")
-st.markdown("Visualize Net Open Interest or Net Volume (Calls − Puts) across actual strikes and expiries using a static chart.")
+st.title("Options Net Heatmap (Open Interest / Volume / GEX)")
+st.markdown("Static heatmap (matplotlib) showing Calls − Puts for Open Interest, Volume, or Gamma Exposure (GEX).")
 
 col_inputs, col_info = st.columns([1, 2])
 
 with col_inputs:
     symbol = st.text_input("Ticker symbol", value="AAPL").upper().strip()
-    METRIC = st.selectbox("Metric", options=["Open Interest", "Volume"])
+    METRIC = st.selectbox(
+        "Metric",
+        options=["Open Interest", "Volume", "GEX (shares)", "Dollar GEX"]
+    )
     STRIKE_RANGE = st.number_input(
         "Strikes above / below current price (count)",
         min_value=1,
@@ -64,18 +80,17 @@ with col_inputs:
     refresh = st.button("Update (re-fetch)")
 
 with col_info:
-    st.markdown("Usage tips:")
-    st.markdown("- Choose metric: Open Interest (openInterest) or Volume (volume).")
-    st.markdown("- Displays actual strike levels (no binning).")
-    st.markdown("- Choose how many strikes above and below current price to show.")
+    st.markdown("- Metric: choose Open Interest (openInterest), Volume (volume), GEX (shares) or Dollar GEX.")
+    st.markdown("- GEX (shares): change in total delta (in shares) for a $1 move; Dollar GEX = GEX_shares × spot.")
+    st.markdown("- If implied vol is missing for strikes, those strikes are omitted from GEX (or treated as 0).")
     st.markdown(f"- Report generated: {datetime.utcnow().isoformat(timespec='seconds')} UTC")
 
 if not symbol:
     st.info("Enter a ticker symbol to continue.")
     st.stop()
 
-metric_col = "openInterest" if METRIC == "Open Interest" else "volume"
-colorbar_title = f"Net {METRIC} (Calls − Puts)"
+# Map chosen metric to internal handling
+metric_col_label = METRIC
 
 # =============================
 # FETCH DATA
@@ -99,36 +114,89 @@ if not all_expiries:
 expiries = all_expiries[:EXPIRY_COUNT]
 
 all_data = []
-missing_metric_warned = False
+missing_iv_count = 0
+total_iv_cells = 0
 
 for expiry in expiries:
     calls, puts = get_option_chain_for_expiry(ticker, expiry)
     if calls is None or puts is None:
         continue
 
-    if "strike" not in calls.columns or "strike" not in puts.columns:
-        continue
+    # ensure expected columns exist; add defaults if missing
+    for df in (calls, puts):
+        if "strike" not in df.columns:
+            df["strike"] = np.nan
+        if "openInterest" not in df.columns:
+            df["openInterest"] = 0
+        if "volume" not in df.columns:
+            df["volume"] = 0
+        # yfinance commonly uses 'impliedVolatility'
+        if "impliedVolatility" not in df.columns:
+            df["impliedVolatility"] = np.nan
 
-    # If metric column missing, fill with zeros and warn once
-    if metric_col not in calls.columns:
-        calls[metric_col] = 0
-        if not missing_metric_warned and METRIC == "Volume":
-            st.warning("Volume column not present on some option chains; treating missing values as 0.")
-            missing_metric_warned = True
-    if metric_col not in puts.columns:
-        puts[metric_col] = 0
-        if not missing_metric_warned and METRIC == "Volume":
-            st.warning("Volume column not present on some option chains; treating missing values as 0.")
-            missing_metric_warned = True
+    # aggregate per strike
+    calls_g = calls.groupby("strike").agg(
+        call_oi=("openInterest", "sum"),
+        call_vol=("volume", "sum"),
+        call_iv_mean=("impliedVolatility", "mean"),
+    )
+    puts_g = puts.groupby("strike").agg(
+        put_oi=("openInterest", "sum"),
+        put_vol=("volume", "sum"),
+        put_iv_mean=("impliedVolatility", "mean"),
+    )
 
-    call_vals = calls.groupby("strike")[metric_col].sum()
-    put_vals = puts.groupby("strike")[metric_col].sum()
-    net = call_vals.subtract(put_vals, fill_value=0)
+    strikes_union = sorted(set(calls_g.index).union(puts_g.index))
 
-    df = net.reset_index()
-    df.columns = ["strike", "net_metric"]
-    df["expiry"] = expiry
+    rows = []
+    for K in strikes_union:
+        call_row = calls_g.loc[K] if K in calls_g.index else pd.Series({"call_oi": 0, "call_vol": 0, "call_iv_mean": np.nan})
+        put_row = puts_g.loc[K] if K in puts_g.index else pd.Series({"put_oi": 0, "put_vol": 0, "put_iv_mean": np.nan})
 
+        call_oi = float(call_row.get("call_oi", 0) or 0)
+        put_oi = float(put_row.get("put_oi", 0) or 0)
+        net_oi = call_oi - put_oi
+
+        call_vol = float(call_row.get("call_vol", 0) or 0)
+        put_vol = float(put_row.get("put_vol", 0) or 0)
+        net_vol = call_vol - put_vol
+
+        # estimate strike IV as OI-weighted average of call/put IV if available, else mean
+        iv_num = 0.0
+        iv_den = 0.0
+        if not np.isnan(call_row.get("call_iv_mean", np.nan)):
+            iv_num += (call_row["call_iv_mean"] * call_oi)
+            iv_den += call_oi
+        if not np.isnan(put_row.get("put_iv_mean", np.nan)):
+            iv_num += (put_row["put_iv_mean"] * put_oi)
+            iv_den += put_oi
+        if iv_den > 0:
+            strike_iv = iv_num / iv_den
+        else:
+            cand = []
+            if not np.isnan(call_row.get("call_iv_mean", np.nan)):
+                cand.append(call_row["call_iv_mean"])
+            if not np.isnan(put_row.get("put_iv_mean", np.nan)):
+                cand.append(put_row["put_iv_mean"])
+            strike_iv = np.nan if len(cand) == 0 else float(np.nanmean(cand))
+
+        if np.isnan(strike_iv):
+            missing_iv_count += 1
+        total_iv_cells += 1
+
+        rows.append({
+            "strike": float(K),
+            "call_oi": call_oi,
+            "put_oi": put_oi,
+            "net_oi": net_oi,
+            "call_vol": call_vol,
+            "put_vol": put_vol,
+            "net_vol": net_vol,
+            "iv": strike_iv,
+            "expiry": expiry,
+        })
+
+    df = pd.DataFrame(rows)
     all_data.append(df)
 
 if not all_data:
@@ -136,6 +204,28 @@ if not all_data:
     st.stop()
 
 nodes = pd.concat(all_data, ignore_index=True)
+
+if missing_iv_count > 0:
+    st.warning(f"{missing_iv_count} strike-IV cells missing out of {total_iv_cells}. GEX will be 0 for strikes without IV.")
+
+# =============================
+# COMPUTE GEX / DOLLAR GEX
+# =============================
+# compute time-to-expiry in years
+today = pd.Timestamp.utcnow().normalize()
+nodes["expiry_dt"] = pd.to_datetime(nodes["expiry"])
+nodes["T"] = (nodes["expiry_dt"] - today).dt.total_seconds() / (365.0 * 24 * 3600)
+nodes["T"] = nodes["T"].clip(lower=0.0)
+
+# compute gamma per share using implied vol (iv is expected as decimal, e.g., 0.25)
+nodes["gamma_per_share"] = nodes.apply(
+    lambda r: bs_gamma(price, r["strike"], max(r["T"], 1e-9), float(r["iv"]) if not np.isnan(r["iv"]) else 0.0),
+    axis=1
+)
+
+# GEX in shares and in dollars
+nodes["gex_shares"] = nodes["gamma_per_share"] * nodes["net_oi"] * CONTRACT_SIZE
+nodes["gex_dollar"] = nodes["gex_shares"] * price
 
 # =============================
 # SELECT STRIKES AROUND PRICE (actual strikes)
@@ -156,10 +246,23 @@ if nodes.empty:
     st.stop()
 
 # =============================
+# PICK METRIC FOR HEATMAP
+# =============================
+if METRIC == "Open Interest":
+    value_col = "net_oi"
+elif METRIC == "Volume":
+    value_col = "net_vol"
+elif METRIC == "GEX (shares)":
+    value_col = "gex_shares"
+elif METRIC == "Dollar GEX":
+    value_col = "gex_dollar"
+else:
+    value_col = "net_oi"
+
+# =============================
 # BUILD HEATMAP (sort descending so top is highest strike)
 # =============================
-heatmap = nodes.pivot_table(index="strike", columns="expiry", values="net_metric", aggfunc="sum").fillna(0)
-
+heatmap = nodes.pivot_table(index="strike", columns="expiry", values=value_col, aggfunc="sum").fillna(0)
 # sort descending -> highest strike first row (will display at top with origin='upper')
 heatmap = heatmap.sort_index(ascending=False)
 
@@ -169,7 +272,7 @@ strike_labels = [str(int(s)) for s in heatmap.index]  # highest -> lowest
 z = heatmap.values  # rows = strike_labels order highest->lowest
 
 # =============================
-# FIND KING CALL & KING PUT NODES
+# KING NODES (based on chosen metric)
 # =============================
 king_call = {}
 king_put = {}
@@ -185,9 +288,8 @@ for col in heatmap.columns:
 # =============================
 fig, ax = plt.subplots(figsize=(12, max(6, len(strike_labels) * 0.18)))
 
-# colormap and normalization centered at zero
+# diverging colormap centered at zero
 cmap = plt.get_cmap("RdYlGn")
-# symmetric norm around 0 for good divergence coloring
 max_abs = np.nanmax(np.abs(z)) if z.size else 1
 norm = colors.TwoSlopeNorm(vmin=-max_abs, vcenter=0, vmax=max_abs)
 
@@ -205,36 +307,31 @@ ax.set_title(f"{symbol} | Price: {price:.2f} | Net {METRIC} Heatmap (King Call &
 
 # add colorbar
 cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.04)
-cbar.set_label(colorbar_title)
+cbar.set_label(f"Net {METRIC} (Calls − Puts)")
 
 # annotations (text) and king highlights
-# choose threshold for text color contrast
 for i in range(z.shape[0]):
     for j in range(z.shape[1]):
         val = z[i, j]
         txt = format_oi_value(val)
-        # find if this cell is king call or king put
         strike_val = int(heatmap.index[i])
         expiry_val = heatmap.columns[j]
         is_king = (expiry_val in king_call and strike_val == king_call[expiry_val]) or (
             expiry_val in king_put and strike_val == king_put[expiry_val]
         )
 
-        # text color depends on background intensity
         text_color = "white" if abs(val) > (max_abs * 0.35) else "black"
         fontweight = "bold" if is_king else "normal"
         fontsize = 10 if is_king else 8
 
         ax.text(j, i, txt, ha="center", va="center", color=text_color, fontsize=fontsize, fontweight=fontweight)
 
-        # draw a rectangle around king cells
         if is_king:
             rect = plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False, edgecolor="white", linewidth=1.5)
             ax.add_patch(rect)
 
 plt.tight_layout()
 
-# display static chart in Streamlit
 st.pyplot(fig)
 
 # =============================
@@ -247,16 +344,16 @@ with st.expander("King nodes (by expiry)"):
     rows = []
     for expiry in heatmap.columns:
         rows.append(
-            f"- {pd.to_datetime(expiry).date().isoformat()}: King Call = {king_call.get(expiry)}, King Put = {king_put.get(expiry)}"
+            f"- {pd.to_datetime(expiry).date().isoformat()}: King = {king_call.get(expiry)} (max), {king_put.get(expiry)} (min)"
         )
     st.markdown("\n".join(rows))
 
-csv = nodes[["expiry", "strike", "net_metric"]].sort_values(["expiry", "strike"])
-csv = csv.rename(columns={"net_metric": f"net_{METRIC.replace(' ', '_').lower()}"})
+# prepare CSV (include GEX columns if present)
+csv = nodes[["expiry", "strike", "net_oi", "net_vol", "iv", "gamma_per_share", "gex_shares", "gex_dollar"]].sort_values(["expiry", "strike"])
 csv_bytes = csv.to_csv(index=False).encode("utf-8")
 st.download_button(
-    f"Download CSV of net {METRIC} by strike",
+    f"Download CSV (includes GEX columns)",
     data=csv_bytes,
-    file_name=f"{symbol}_net_{METRIC.replace(' ', '_').lower()}_{datetime.utcnow().date()}.csv",
+    file_name=f"{symbol}_net_metrics_{datetime.utcnow().date()}.csv",
     mime="text/csv",
 )
