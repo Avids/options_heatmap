@@ -26,8 +26,8 @@ def format_oi_value(val):
     return f"{v:,}"
 
 @st.cache_data(show_spinner=False, ttl=300)
-def fetch_ticker_data(ticker_symbol: str):
-    """Fetch price, expiries, and ticker object - cached for 5 minutes"""
+def fetch_price_and_expiries(ticker_symbol: str):
+    """Fetch price and expiries - cached for 5 minutes"""
     t = yf.Ticker(ticker_symbol)
     hist = t.history(period="1d")
     price = float(hist["Close"].iloc[-1]) if not hist.empty else None
@@ -35,7 +35,11 @@ def fetch_ticker_data(ticker_symbol: str):
         expiries = list(t.options)
     except Exception:
         expiries = []
-    return price, expiries, t
+    return price, expiries
+
+def get_ticker(ticker_symbol: str):
+    """Get ticker object - not cached since it's not serializable"""
+    return yf.Ticker(ticker_symbol)
 
 def get_option_chain_for_expiry(ticker, expiry):
     try:
@@ -136,7 +140,8 @@ with st.expander("About / Help", expanded=False):
 # FETCH DATA
 # =============================
 with st.spinner(f"Fetching data for {symbol} ..."):
-    price, all_expiries, ticker = fetch_ticker_data(symbol)
+    price, all_expiries = fetch_price_and_expiries(symbol)
+    ticker = get_ticker(symbol)
 
 if price is None:
     st.error(f"Could not fetch price or options for '{symbol}'. Check the ticker and try again.")
