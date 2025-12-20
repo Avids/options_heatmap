@@ -52,6 +52,15 @@ def bs_gamma(S, K, T, sigma):
     pdf_d1 = exp(-0.5 * d1 * d1) / sqrt(2 * pi)
     gamma = pdf_d1 / (S * sigma * sqrtT)
     return float(gamma)
+# ===== Firday ======
+def is_friday(date):
+    return date.weekday() == 4  # Monday=0
+# ==================
+
+def is_third_friday(date):
+    if date.weekday() != 4:
+        return False
+    return 15 <= date.day <= 21
 
 # =============================
 # SIDEBAR / INPUTS
@@ -75,7 +84,7 @@ with col_inputs:
         step=1,
     )
     EXPIRY_COUNT = st.slider(
-        "Number of expiries to include", min_value=1, max_value=24, value=4
+        "Number of expiries to include (max 12)", min_value=1, max_value=12, value=4
     )
     refresh = st.button("Update (re-fetch)")
 
@@ -116,6 +125,13 @@ with st.expander("About / Help", expanded=False):
     - Data comes from Yahoo via yfinance and may be incomplete.
     - GEX accuracy depends on available implied vol; missing IVs are warned and handled.
     """)
+# ======= Option type selector ====
+
+OPTION_TYPE = st.selectbox(
+    "Option type",
+    options=["Weekly", "Monthly", "Weekly + Monthly"]
+)
+
 
 # =============================
 # FETCH DATA
@@ -136,7 +152,38 @@ if not all_expiries:
     st.error(f"No option expiries returned for '{symbol}'.")
     st.stop()
 
-expiries = all_expiries[:EXPIRY_COUNT]
+# expiries = all_expiries[:EXPIRY_COUNT]
+# =============== Expiry type
+
+# convert expiry strings to datetime
+expiry_dates = [
+    pd.to_datetime(e, errors="coerce") for e in all_expiries
+]
+expiry_map = dict(zip(all_expiries, expiry_dates))
+
+filtered_expiries = []
+
+for e, d in expiry_map.items():
+    if d is None or pd.isna(d):
+        continue
+
+    if OPTION_TYPE == "Monthly" and is_third_friday(d):
+        filtered_expiries.append(e)
+
+    elif OPTION_TYPE == "Weekly" and is_friday(d) and not is_third_friday(d):
+        filtered_expiries.append(e)
+
+    elif OPTION_TYPE == "Weekly + Monthly" and is_friday(d):
+        filtered_expiries.append(e)
+
+# hard cap at 12 expiries
+filtered_expiries = filtered_expiries[:12]
+
+# respect slider but never exceed 12
+expiries = filtered_expiries[:min(EXPIRY_COUNT, 12)]
+
+# ============
+
 
 all_data = []
 missing_iv_count = 0
